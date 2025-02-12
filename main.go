@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -16,8 +17,13 @@ var store = struct {
 }{m: make(map[string]string)}
 
 var ErrorNoSuchKey = errors.New("no such key")
+var logger TransactionLogger
 
 func main() {
+	if err := initializeTransactionLog(); err != nil {
+		log.Fatal(err)
+	}
+
 	r := mux.NewRouter()
 
 	r.HandleFunc("/", pingHandler)
@@ -54,6 +60,8 @@ func keyValuePutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logger.WritePut(key, string(value)) // Log a PUT event!
+
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -85,6 +93,8 @@ func keyValueDeleteHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	logger.WriteDelete(key) // Log a DELETE event!
+
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -114,4 +124,32 @@ func Delete(key string) error {
 	store.Unlock()
 
 	return nil
+}
+
+func initializeTransactionLog() error {
+	var err error
+
+	logger, err = NewFileTranscationLogger("transaction.log")
+	if err != nil {
+		return fmt.Errorf("failed to create event logger: %w", err)
+	}
+
+	events, errors := logger.ReadEvents()
+	e, ok := Event{}, true
+
+	for ok && err == nil {
+		select {
+		case err, ok = <-errors: // Retrieve any errors
+		case e, ok = <-events:
+			switch e.EventType {
+			case EventDelete: // Got a DELETE event!
+				err = Delete(e.Key)
+			case EventPut: // Got a PUT event!
+				err = Put(e.Key, e.Value)
+			}
+		}
+	}
+
+	logger.Run()
+	return err
 }
